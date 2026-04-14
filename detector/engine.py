@@ -1,9 +1,9 @@
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
+from datetime import datetime
 
 class DetectionEngine:
-    def __init__(self):
-        self.thresholds = {
+    def __init__(self, thresholds: Optional[Dict[str, float]] = None):
+        self.thresholds = thresholds or {
             "cpu": 80.0,
             "memory": 85.0,
             "disk": 90.0,

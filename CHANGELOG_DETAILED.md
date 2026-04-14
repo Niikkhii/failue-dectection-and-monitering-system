@@ -2,6 +2,28 @@
 
 This file tracks major architecture and implementation changes made to this project.
 
+## 2026-04-14 - Phase 1 Hardening
+
+### Added Environment Profiles
+- Added `config.py` with runtime settings:
+  - `APP_ENV`
+  - `DB_PATH`
+  - `BATCH_WINDOW_SIZE`
+  - `THRESHOLD_*` overrides
+- Detection engine now accepts environment-driven threshold maps.
+
+### Added Alert Persistence
+- Extended `alerts` schema with:
+  - `source`, `metric_type`, `value`, `threshold`, `resolved_at`
+- Added migration-safe column checks for existing DBs.
+- Alert manager now writes alerts to DB and reloads persisted alerts on startup.
+
+### Added Baseline Tests
+- Introduced `pytest` test set:
+  - detection engine unit tests
+  - database + alert persistence tests
+  - API smoke tests for health/threshold endpoints
+
 ## 2026-04-14 - Real Metrics + Batch Processing Refactor
 
 ### 1) Core Architecture Change

@@ -88,7 +88,12 @@ It is designed as a learning-to-production bridge:
 - `timestamp`
 - `level`
 - `message`
+- `source`
+- `metric_type`
+- `value`
+- `threshold`
 - `resolved`
+- `resolved_at`
 
 ### `events`
 - `id` (PK)
@@ -141,7 +146,7 @@ It is designed as a learning-to-production bridge:
 - Large sudden metric jump -> anomaly alert likely.
 - Critical alerts increase -> `/dashboard/health` shifts to `critical`.
 - Resolving alerts -> health can recover to `warning` or `healthy`.
-- API restart -> in-memory alert history resets (current design limitation).
+- API restart -> persisted alerts are reloaded from DB.
 
 ## Implementation Approach
 
@@ -183,6 +188,23 @@ python3 -m venv venv
 
 - [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 
+### Optional UI (Streamlit)
+
+Terminal 3:
+
+```bash
+./run_ui.sh
+```
+
+Then open:
+- [http://localhost:8501](http://localhost:8501)
+
+The Streamlit UI shows:
+- system health and alert counts
+- agent running state and batch progress
+- processed metrics summary table + chart
+- active alerts table
+
 ## Smoke Test Checklist
 
 Expected `200`:
@@ -195,6 +217,14 @@ Expected `200`:
 Also verify:
 - `raw_metrics_count` increases while collector runs.
 - `batches_processed` increments after enough samples are collected.
+
+## Test Instructions
+
+Run all tests:
+
+```bash
+./venv/bin/pytest -q
+```
 
 ## Unwanted File Cleanup Done
 
@@ -210,16 +240,30 @@ Added `.gitignore` to prevent re-adding:
 
 ## Current Limitations
 
-- Alerts are in memory only (not persisted across restart).
+- Alert metadata is persisted in SQLite, but alert workflow is still basic (no ack/escalation policy).
 - SQLite is local-node friendly, not distributed scale.
 - No authentication/authorization yet.
-- No automated tests/CI yet.
+- No CI pipeline yet (tests exist locally and pass via `pytest`).
 - Collector currently covers host-level metrics only.
 
 ## Recommended Next Steps
 
-- Persist alerts and incident correlations to DB.
-- Add test suite (unit + API + integration).
+- Add incident correlation table and analytics against alert history.
+- Wire tests into CI (GitHub Actions).
 - Add auth/rate limiting for APIs.
 - Add retention and pruning policy.
 - Add deployment profiles (`dev/staging/prod`) with per-environment thresholds.
+
+## Phase 1 Hardening Completed
+
+- Added environment-based runtime config in `config.py`:
+  - `APP_ENV` (`dev` or `prod`)
+  - `DB_PATH`
+  - `BATCH_WINDOW_SIZE`
+  - optional per-metric overrides like `THRESHOLD_CPU`
+- Added alert persistence fields and migration-safe schema updates in `storage/database.py`.
+- Alert manager now persists new alerts to DB and reloads on startup.
+- Added baseline pytest suite:
+  - `tests/test_detection_engine.py`
+  - `tests/test_database_and_alerts.py`
+  - `tests/test_api_smoke.py`

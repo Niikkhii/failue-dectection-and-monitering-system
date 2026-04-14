@@ -45,7 +45,12 @@ class Database:
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                 level TEXT NOT NULL,
                 message TEXT NOT NULL,
-                resolved BOOLEAN DEFAULT 0
+                source TEXT DEFAULT 'system',
+                metric_type TEXT,
+                value REAL,
+                threshold REAL,
+                resolved BOOLEAN DEFAULT 0,
+                resolved_at DATETIME
             )
         ''')
         
@@ -60,7 +65,23 @@ class Database:
         ''')
         
         conn.commit()
+        self._ensure_alert_columns(cursor)
+        conn.commit()
         conn.close()
+
+    def _ensure_alert_columns(self, cursor):
+        cursor.execute("PRAGMA table_info(alerts)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+        required_columns = {
+            "source": "TEXT DEFAULT 'system'",
+            "metric_type": "TEXT",
+            "value": "REAL",
+            "threshold": "REAL",
+            "resolved_at": "DATETIME",
+        }
+        for col_name, definition in required_columns.items():
+            if col_name not in existing_columns:
+                cursor.execute(f"ALTER TABLE alerts ADD COLUMN {col_name} {definition}")
 
     def insert_raw_metric(
         self,
@@ -161,17 +182,45 @@ class Database:
         conn.close()
         return [dict(zip(columns, row)) for row in rows]
 
-    def insert_alert(self, level: str, message: str) -> int:
+    def insert_alert(
+        self,
+        level: str,
+        message: str,
+        source: str = "system",
+        metric_type: Optional[str] = None,
+        value: Optional[float] = None,
+        threshold: Optional[float] = None,
+    ) -> int:
         """Insert a new alert"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute(
-            'INSERT INTO alerts (level, message) VALUES (?, ?)',
-            (level, message)
+            '''
+            INSERT INTO alerts (level, message, source, metric_type, value, threshold)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ''',
+            (level, message, source, metric_type, value, threshold),
         )
         conn.commit()
+        alert_id = cursor.lastrowid
         conn.close()
-        return cursor.lastrowid
+        return alert_id
+
+    def resolve_alert(self, alert_id: int) -> bool:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            UPDATE alerts
+            SET resolved = 1, resolved_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND resolved = 0
+            ''',
+            (alert_id,),
+        )
+        conn.commit()
+        updated = cursor.rowcount > 0
+        conn.close()
+        return updated
     
     def insert_event(self, event_type: str, data: Optional[str] = None) -> int:
         """Insert a new event"""
@@ -207,7 +256,25 @@ class Database:
         """Get recent alerts"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM alerts ORDER BY timestamp DESC LIMIT ?', (limit,))
+        cursor.execute('SELECT * FROM alerts ORDER BY id DESC LIMIT ?', (limit,))
+        columns = [description[0] for description in cursor.description]
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(zip(columns, row)) for row in rows]
+
+    def get_active_alerts(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get unresolved alerts"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT * FROM alerts
+            WHERE resolved = 0
+            ORDER BY id DESC
+            LIMIT ?
+            ''',
+            (limit,),
+        )
         columns = [description[0] for description in cursor.description]
         rows = cursor.fetchall()
         conn.close()

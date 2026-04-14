@@ -9,12 +9,19 @@ from alerting.alerts import AlertManager, AlertLevel
 from detector.engine import DetectionEngine
 from agent.monitor import MonitoringAgent
 from dashboard.app import DashboardService
+from config import get_settings
 
 # Initialize components
-db = Database("monitoring.db")
-alert_manager = AlertManager()
-detection_engine = DetectionEngine()
-monitoring_agent = MonitoringAgent(db, alert_manager, detection_engine)
+settings = get_settings()
+db = Database(settings.db_path)
+alert_manager = AlertManager(db=db)
+detection_engine = DetectionEngine(thresholds=settings.thresholds)
+monitoring_agent = MonitoringAgent(
+    db,
+    alert_manager,
+    detection_engine,
+    window_size=settings.batch_window_size,
+)
 dashboard_service = DashboardService(db, alert_manager, detection_engine)
 
 # Create FastAPI app
@@ -48,6 +55,7 @@ class ThresholdUpdate(BaseModel):
 @app.on_event("startup")
 async def startup():
     """Start background tasks on app startup"""
+    alert_manager.load_active_from_db()
     asyncio.create_task(monitoring_agent.start())
     print("Monitoring system started")
 

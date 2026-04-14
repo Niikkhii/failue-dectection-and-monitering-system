@@ -9,20 +9,43 @@ class AlertLevel(str, Enum):
     RESOLVED = "resolved"
 
 class AlertManager:
-    def __init__(self):
+    def __init__(self, db=None):
+        self.db = db
         self.alerts: List[Dict[str, Any]] = []
         self.subscribers: List[callable] = []
     
-    def create_alert(self, level: AlertLevel | str, message: str, source: str = "system") -> Dict[str, Any]:
+    def load_active_from_db(self):
+        """Load unresolved alerts from DB into memory on startup."""
+        if not self.db:
+            return
+        self.alerts = self.db.get_alerts(limit=1000)
+
+    def create_alert(
+        self,
+        level: AlertLevel | str,
+        message: str,
+        source: str = "system",
+        metric_type: Optional[str] = None,
+        value: Optional[float] = None,
+        threshold: Optional[float] = None,
+    ) -> Dict[str, Any]:
         """Create a new alert"""
         level_value = level.value if isinstance(level, AlertLevel) else str(level).lower()
+        alert_id = (
+            self.db.insert_alert(level_value, message, source, metric_type, value, threshold)
+            if self.db
+            else len(self.alerts) + 1
+        )
         alert = {
-            "id": len(self.alerts) + 1,
+            "id": alert_id,
             "timestamp": datetime.now().isoformat(),
             "level": level_value,
             "message": message,
             "source": source,
-            "resolved": False
+            "metric_type": metric_type,
+            "value": value,
+            "threshold": threshold,
+            "resolved": False,
         }
         self.alerts.append(alert)
         self._notify_subscribers(alert)
@@ -34,6 +57,8 @@ class AlertManager:
             if alert["id"] == alert_id:
                 alert["resolved"] = True
                 alert["resolved_at"] = datetime.now().isoformat()
+                if self.db:
+                    self.db.resolve_alert(alert_id)
                 self._notify_subscribers(alert)
                 return alert
         return None

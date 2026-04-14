@@ -2,13 +2,13 @@ import asyncio
 from typing import Dict, Any, List
 
 class MonitoringAgent:
-    def __init__(self, db, alert_manager, detection_engine):
+    def __init__(self, db, alert_manager, detection_engine, window_size: int = 10):
         self.db = db
         self.alert_manager = alert_manager
         self.detection_engine = detection_engine
         self.is_running = False
         self.batch_count = 0
-        self.window_size = 10
+        self.window_size = window_size
 
     async def start(self):
         """Start the monitoring processor loop."""
@@ -56,6 +56,9 @@ class MonitoringAgent:
                                 f"{max_val:.2f} >= {threshold_alert['threshold']}"
                             ),
                             source="batch_processor",
+                            metric_type=metric_type,
+                            value=max_val,
+                            threshold=threshold_alert["threshold"],
                         )
                     elif anomaly:
                         self.alert_manager.create_alert(
@@ -65,6 +68,8 @@ class MonitoringAgent:
                                 f"latest={latest:.2f}, mean={mean:.2f}, std={std_dev:.2f}"
                             ),
                             source="batch_processor",
+                            metric_type=metric_type,
+                            value=latest,
                         )
 
                     self.db.insert_processed_metric(
