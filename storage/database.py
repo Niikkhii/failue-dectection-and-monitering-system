@@ -1,5 +1,4 @@
 import sqlite3
-from datetime import datetime
 from typing import Optional, List, Dict, Any
 
 class Database:
@@ -12,14 +11,30 @@ class Database:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Metrics table
+        # Raw metrics table (collector writes here)
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS metrics (
+            CREATE TABLE IF NOT EXISTS raw_metrics (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                name TEXT NOT NULL,
+                metric_type TEXT NOT NULL,
                 value REAL NOT NULL,
+                server TEXT DEFAULT 'localhost',
                 tags TEXT
+            )
+        ''')
+
+        # Processed metrics table (agent writes here)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS processed_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                metric_type TEXT NOT NULL,
+                mean REAL NOT NULL,
+                min_value REAL NOT NULL,
+                max_value REAL NOT NULL,
+                std_dev REAL,
+                anomaly_detected BOOLEAN DEFAULT 0,
+                threshold_exceeded BOOLEAN DEFAULT 0
             )
         ''')
         
@@ -46,19 +61,106 @@ class Database:
         
         conn.commit()
         conn.close()
-    
-    def insert_metric(self, name: str, value: float, tags: Optional[str] = None) -> int:
-        """Insert a new metric"""
+
+    def insert_raw_metric(
+        self,
+        metric_type: str,
+        value: float,
+        server: str = "localhost",
+        tags: Optional[str] = None,
+    ) -> int:
+        """Insert a raw metric sample from collector"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute(
-            'INSERT INTO metrics (name, value, tags) VALUES (?, ?, ?)',
-            (name, value, tags)
+            'INSERT INTO raw_metrics (metric_type, value, server, tags) VALUES (?, ?, ?, ?)',
+            (metric_type, value, server, tags),
         )
         conn.commit()
         conn.close()
         return cursor.lastrowid
-    
+
+    # Backward-compatible alias used by existing /metrics POST
+    def insert_metric(self, name: str, value: float, tags: Optional[str] = None) -> int:
+        return self.insert_raw_metric(metric_type=name, value=value, tags=tags)
+
+    def get_raw_metrics_count(self) -> int:
+        """Get raw metrics row count"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM raw_metrics')
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+
+    def get_last_n_raw_metrics(self, n: int = 10) -> Dict[str, List[float]]:
+        """Get last N raw metrics grouped by metric type"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT metric_type, value
+            FROM raw_metrics
+            ORDER BY id DESC
+            LIMIT ?
+            ''',
+            (n,),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+
+        grouped: Dict[str, List[float]] = {}
+        for metric_type, value in rows:
+            grouped.setdefault(metric_type, []).append(value)
+        return grouped
+
+    def clear_raw_metrics(self):
+        """Delete raw metric rows after batch processing"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM raw_metrics')
+        conn.commit()
+        conn.close()
+
+    def insert_processed_metric(
+        self,
+        metric_type: str,
+        mean: float,
+        min_val: float,
+        max_val: float,
+        std_dev: float,
+        anomaly: bool,
+        threshold_exceeded: bool,
+    ) -> int:
+        """Insert processed metric summary for one batch"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            INSERT INTO processed_metrics (
+                metric_type, mean, min_value, max_value, std_dev,
+                anomaly_detected, threshold_exceeded
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (metric_type, mean, min_val, max_val, std_dev, anomaly, threshold_exceeded),
+        )
+        conn.commit()
+        conn.close()
+        return cursor.lastrowid
+
+    def get_latest_processed_metrics(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Get latest processed metric rows"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT * FROM processed_metrics ORDER BY id DESC LIMIT ?',
+            (limit,),
+        )
+        columns = [description[0] for description in cursor.description]
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(zip(columns, row)) for row in rows]
+
     def insert_alert(self, level: str, message: str) -> int:
         """Insert a new alert"""
         conn = sqlite3.connect(self.db_path)
@@ -84,11 +186,19 @@ class Database:
         return cursor.lastrowid
     
     def get_metrics(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """Get recent metrics"""
+        """Get recent raw metrics (API compatibility shape)"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM metrics ORDER BY timestamp DESC LIMIT ?', (limit,))
-        columns = [description[0] for description in cursor.description]
+        cursor.execute(
+            '''
+            SELECT id, timestamp, metric_type AS name, value, tags
+            FROM raw_metrics
+            ORDER BY id DESC
+            LIMIT ?
+            ''',
+            (limit,),
+        )
+        columns = [desc[0] for desc in cursor.description]
         rows = cursor.fetchall()
         conn.close()
         return [dict(zip(columns, row)) for row in rows]

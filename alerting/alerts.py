@@ -13,12 +13,13 @@ class AlertManager:
         self.alerts: List[Dict[str, Any]] = []
         self.subscribers: List[callable] = []
     
-    def create_alert(self, level: AlertLevel, message: str, source: str = "system") -> Dict[str, Any]:
+    def create_alert(self, level: AlertLevel | str, message: str, source: str = "system") -> Dict[str, Any]:
         """Create a new alert"""
+        level_value = level.value if isinstance(level, AlertLevel) else str(level).lower()
         alert = {
             "id": len(self.alerts) + 1,
             "timestamp": datetime.now().isoformat(),
-            "level": level.value,
+            "level": level_value,
             "message": message,
             "source": source,
             "resolved": False

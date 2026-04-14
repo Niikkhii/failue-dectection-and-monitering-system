@@ -1,302 +1,225 @@
-# Failure Detection Monitoring System
+# Failure Detection and Monitoring System
 
-A lightweight FastAPI-based monitoring system that continuously collects synthetic system metrics, detects anomalies and threshold breaches, raises alerts, and exposes dashboard-style APIs for observability.
+Production-style monitoring backend built with FastAPI, SQLite, and a separate collector process.
 
-## 1) Project Purpose
+## Overview
 
-This project demonstrates an end-to-end monitoring pipeline:
-- Collect runtime metrics periodically.
-- Detect abnormal behavior and threshold violations.
-- Generate and track alerts.
-- Provide health, status, and summary APIs for dashboards or integrations.
+This project detects unhealthy behavior by collecting real host metrics, processing them in batches, and generating alerts when:
+- values cross configured thresholds, or
+- values show anomaly-like deviations from recent batch statistics.
 
-It is useful as:
-- A learning project for monitoring/alerting fundamentals.
-- A base template for adding real infrastructure metrics.
-- A backend API for a monitoring dashboard UI.
+It is designed as a learning-to-production bridge:
+- simple enough to run locally,
+- structured with clear separation of concerns (collector, processor, API, storage, alerting).
 
-## 2) High-Level Architecture
+## Architecture
 
-Core modules:
-- `main.py` - FastAPI app, API routes, startup/shutdown lifecycle.
-- `agent/monitor.py` - Background monitoring agent and metric collection loop.
-- `detector/engine.py` - Threshold checks and anomaly detection logic.
-- `alerting/alerts.py` - In-memory alert management and stats.
-- `storage/database.py` - SQLite persistence for metrics/events (and alert table schema).
-- `dashboard/app.py` - Dashboard aggregation APIs (`/dashboard*`).
+### Components
 
-Data flow:
-1. App starts (`startup` event in `main.py`).
-2. Background agent (`MonitoringAgent`) begins collecting metrics every 5 seconds.
-3. Each metric is persisted to SQLite (`metrics` table).
-4. Detection engine evaluates:
-   - Statistical anomalies (window-based deviation),
-   - Threshold violations (`cpu`, `memory`, `disk`, `error_rate`).
-5. Alert manager creates in-memory alerts when issues are found.
-6. Dashboard/service endpoints expose metrics, alerts, and health summaries.
+- `metrics_collector.py`
+  - Separate process.
+  - Collects real metrics (`cpu`, `memory`, `disk`) using `psutil` every 5 seconds.
+  - Writes to `raw_metrics`.
 
-## 3) Runtime Components and Responsibilities
+- `agent/monitor.py`
+  - Background processor running inside FastAPI app lifecycle.
+  - Waits until enough raw rows exist (window size = 10).
+  - Processes one batch: computes `mean/min/max/std_dev`, checks anomaly + thresholds.
+  - Writes results to `processed_metrics`.
+  - Creates alerts through `AlertManager`.
 
-### 3.1 Monitoring Agent (`agent/monitor.py`)
+- `detector/engine.py`
+  - Threshold map and threshold-check logic.
+  - Anomaly utility logic.
+  - Supports threshold updates.
 
-Responsibilities:
-- Runs asynchronous loop while `is_running=True`.
-- Generates synthetic metrics:
-  - `cpu`
-  - `memory`
-  - `disk`
-  - `error_rate`
-- Stores each sample in database.
-- Maintains `metrics_history` in memory for anomaly detection.
-- Creates events (`metrics_collected`) in database.
+- `alerting/alerts.py`
+  - In-memory alert manager.
+  - Tracks active/resolved alerts and aggregate stats.
 
-Effect on system:
-- Drives all observable data in dashboard and summary endpoints.
-- If this agent stops, metric data and new alerts stop updating.
+- `storage/database.py`
+  - SQLite schema management.
+  - CRUD helpers for raw metrics, processed metrics, events.
 
-### 3.2 Detection Engine (`detector/engine.py`)
+- `dashboard/app.py`
+  - Aggregates data for dashboard endpoints.
 
-Responsibilities:
-- `check_metric(metric_name, value)`:
-  - Compares values against threshold map.
-  - Emits warning/critical alert candidates.
-- `detect_anomaly(metrics, window=10)`:
-  - Computes moving average and std dev over recent values.
-  - Flags latest sample if > 2 standard deviations away.
+- `main.py`
+  - FastAPI app + routes.
+  - Starts/stops background processing agent.
 
-Default threshold map:
-- `cpu`: 80.0
-- `memory`: 85.0
-- `disk`: 90.0
-- `error_rate`: 5.0
+## Data Flow (End-to-End)
 
-Effect on system:
-- A stricter threshold produces more alerts.
-- A wider metric range increases anomaly probability.
-- If history length < window, anomaly detection does not trigger.
+1. Collector reads real host metrics every 5 seconds.
+2. Collector inserts into `raw_metrics`.
+3. Monitoring agent polls raw count every 5 seconds.
+4. When `raw_count >= window_size (10)`, batch processing triggers.
+5. Processor groups by metric type and computes statistics.
+6. Processor checks:
+   - threshold exceeded -> warning/critical alert
+   - anomaly condition -> warning alert
+7. Processor writes one record per metric to `processed_metrics`.
+8. Processor logs event and clears raw buffer for next batch window.
+9. Dashboard endpoints expose processed summaries, status, and alerts.
 
-### 3.3 Alert Manager (`alerting/alerts.py`)
+## Database Schema
 
-Responsibilities:
-- Stores alerts in memory list.
-- Returns active/unresolved/all alerts.
-- Resolves alerts and tracks simple stats.
-- Supports subscriber callbacks.
+### `raw_metrics`
+- `id` (PK)
+- `timestamp`
+- `metric_type`
+- `value`
+- `server`
+- `tags`
 
-Important behavior:
-- Alerts are currently in memory (not persisted by AlertManager).
-- Restarting app resets in-memory alerts and stats.
+### `processed_metrics`
+- `id` (PK)
+- `batch_timestamp`
+- `metric_type`
+- `mean`
+- `min_value`
+- `max_value`
+- `std_dev`
+- `anomaly_detected`
+- `threshold_exceeded`
 
-Effect on system:
-- Dashboard health status depends on unresolved alert counts.
-- More active critical alerts -> status transitions to `critical`.
+### `alerts`
+- `id` (PK)
+- `timestamp`
+- `level`
+- `message`
+- `resolved`
 
-### 3.4 Database Layer (`storage/database.py`)
+### `events`
+- `id` (PK)
+- `timestamp`
+- `event_type`
+- `data`
 
-SQLite tables:
-- `metrics(id, timestamp, name, value, tags)`
-- `alerts(id, timestamp, level, message, resolved)`
-- `events(id, timestamp, event_type, data)`
+## API Reference
 
-Current usage:
-- Metrics and events are actively written and read.
-- In-memory alert manager is primary source for API alert responses.
-- `alerts` table schema exists for extension/future persistence alignment.
+### Core
+- `GET /` - service info + endpoint index
+- `GET /health` - API health check
 
-Effect on system:
-- DB growth directly affects response payload size for endpoints reading large limits.
-- DB lock/corruption issues can break ingestion and dashboard freshness.
-
-### 3.5 Dashboard Service (`dashboard/app.py`)
-
-Responsibilities:
-- `/dashboard` -> aggregate metrics + alerts + stats + events.
-- `/dashboard/metrics-summary` -> grouped counts and min/max/avg per metric.
-- `/dashboard/health` -> health status from active warning/critical alerts.
-
-Effect on system:
-- It is the primary “operator view” layer for current project.
-- If no alerts are active, health status reports `healthy`.
-
-## 4) API Endpoint Reference
-
-### 4.1 Core health and root
-- `GET /health`
-  - Quick service-level health check.
-  - Returns `{"status": "healthy", "service": "monitoring-system"}`.
-- `GET /`
-  - Service metadata + quick endpoint index.
-  - Useful as lightweight entrypoint sanity check.
-
-### 4.2 Metrics
+### Metrics
 - `GET /metrics?limit=100`
-  - Returns most recent metrics from DB.
+  - Returns recent raw metric rows (compatibility shape).
 - `POST /metrics`
-  - Insert external/custom metric record.
-  - Body:
-    - `name: str`
-    - `value: float`
-    - `tags: Optional[str]`
+  - Insert external/custom metric sample.
 
-### 4.3 Alerts
-- `GET /alerts?limit=50`
+### Alerts
+- `GET /alerts`
 - `GET /alerts/active`
 - `POST /alerts`
-  - Body:
-    - `level: str` (`info|warning|critical`)
-    - `message: str`
-    - `source: Optional[str]`
 - `PUT /alerts/{alert_id}/resolve`
 - `GET /alerts/stats`
 
-### 4.4 Dashboard
+### Dashboard
 - `GET /dashboard`
+  - Returns latest processed metrics, active alerts, stats, health status, events.
 - `GET /dashboard/metrics-summary`
+  - Batch-level summary by metric (`batches`, `anomalies`, `overall_mean/min/max`).
 - `GET /dashboard/health`
+  - Health derived from active alert severity.
 
-### 4.5 Agent
+### Agent
 - `GET /agent/status`
-  - Reports:
-    - `is_running`
-    - `metrics_tracked`
-    - `active_alerts`
+  - `is_running`, `window_size`, `batches_processed`, `raw_metrics_count`, `active_alerts`.
 
-## 5) What Affects What (Cause -> Effect Map)
+### Thresholds
+- `GET /thresholds`
+- `PUT /thresholds/{metric}` with body:
+  - `{ "value": 75.0 }`
 
-- Agent stopped -> No new metrics/events -> Dashboard data becomes stale.
-- DB write failure -> Missing metrics/events -> Summaries incomplete or static.
-- Threshold lowered (e.g., CPU 80 -> 60) -> More warning/critical alerts.
-- Threshold raised (e.g., CPU 80 -> 95) -> Fewer threshold-based alerts.
-- High metric volatility -> More anomaly alerts (std-dev rule).
-- Many unresolved critical alerts -> `/dashboard/health` becomes `critical`.
-- Alerts resolved -> Active count decreases -> Health may recover to `warning` or `healthy`.
-- App restart -> In-memory alerts reset -> Health can appear improved until new alerts occur.
+## Cause-and-Effect Map (What Affects What)
 
-## 6) Scenario Type Descriptions (Operational Cases)
+- Collector stopped -> raw table stops growing -> no new batch processing.
+- Raw rows below window size -> agent waits -> summary remains unchanged.
+- High threshold values -> fewer alerts.
+- Low threshold values -> more frequent alerts.
+- Large sudden metric jump -> anomaly alert likely.
+- Critical alerts increase -> `/dashboard/health` shifts to `critical`.
+- Resolving alerts -> health can recover to `warning` or `healthy`.
+- API restart -> in-memory alert history resets (current design limitation).
 
-### Case A: Normal steady state
-Symptoms:
-- `/dashboard/health` => `healthy`
-- `/agent/status` => `is_running: true`
-- `/dashboard/metrics-summary` shows ongoing values
-Interpretation:
-- Ingestion and analysis pipeline is functioning.
+## Implementation Approach
 
-### Case B: Threshold pressure
-Symptoms:
-- Active warnings/criticals increase
-- Alert messages mention threshold exceeded
-Interpretation:
-- One or more metrics are beyond configured risk limits.
-Action:
-- Investigate metric source, tune threshold if needed.
+The solution uses a two-stage pipeline:
 
-### Case C: Anomaly spike without threshold breach
-Symptoms:
-- Warning alerts for anomaly detected
-- Metric may still be under absolute threshold
-Interpretation:
-- Sudden behavior change relative to recent baseline.
-Action:
-- Check upstream deployment/events around that timestamp.
+- **Stage 1: Ingestion**
+  - fast and lightweight writes (`raw_metrics`) from collector.
+- **Stage 2: Analysis**
+  - periodic batch processing for stable statistical decisions.
 
-### Case D: Agent failure or inactivity
-Symptoms:
-- `/agent/status` indicates not running
-- Metrics count in summary stops changing
-Interpretation:
-- Background collector is not active.
-Action:
-- Restart service and inspect startup logs.
+This reduces noisy single-point decisions and mirrors real monitoring system behavior:
+- decoupled producer (collector),
+- processor with windowed analysis,
+- summarized outputs for dashboard/operations.
 
-### Case E: Data-layer issue
-Symptoms:
-- Endpoint errors on metric/event reads or writes
-- Dashboard partially populated or stale
-Interpretation:
-- SQLite file lock/path/permission issue.
-Action:
-- Validate DB path, file permissions, and active process locks.
+## Run Instructions
 
-### Case F: Root endpoint failure
-Symptoms:
-- `GET /` returns 500 while other endpoints work.
-Interpretation:
-- Route-level typing/serialization bug, not full service outage.
-Action:
-- Fix route response model/type hints (already fixed in this repo).
+### 1) Setup
 
-## 7) Setup and Run
+```bash
+cd /Users/nikhilcharantimath/Desktop/failure_detction/monitoring-system
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
+```
 
-Prerequisites:
-- Python 3.13 (recommended in this project environment).
-- macOS/Linux shell compatible with bash script.
+### 2) Start Collector (Terminal 1)
 
-Install:
-1. `cd /Users/nikhilcharantimath/Desktop/failure_detction/monitoring-system`
-2. `python3 -m venv venv` (if not already created)
-3. `./venv/bin/pip install -r requirements.txt`
+```bash
+./run_collector.sh
+```
 
-Run (recommended):
-- `./run_dev.sh`
+### 3) Start Monitoring API (Terminal 2)
 
-Alternative run:
-- `./venv/bin/uvicorn main:app --reload`
+```bash
+./run_monitoring.sh
+```
 
-Open docs:
-- `http://127.0.0.1:8000/docs`
+### 4) Open Swagger
 
-Stop:
-- `Ctrl + C`
+- [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 
-## 8) Smoke Test Checklist
+## Smoke Test Checklist
 
-Expected 200 responses:
-- `GET /dashboard`
-- `GET /dashboard/health`
-- `GET /agent/status`
-- `GET /dashboard/metrics-summary`
+Expected `200`:
 - `GET /`
+- `GET /dashboard`
+- `GET /dashboard/health`
+- `GET /dashboard/metrics-summary`
+- `GET /agent/status`
 
-If `GET /` fails, verify latest code is running and app reloaded.
+Also verify:
+- `raw_metrics_count` increases while collector runs.
+- `batches_processed` increments after enough samples are collected.
 
-## 9) Current Design Trade-offs and Limitations
+## Unwanted File Cleanup Done
 
-- Alerts are in memory; they do not survive restart.
-- Metrics are synthetic/random, not pulled from real host telemetry.
-- No auth/rate limits; API is open by default.
-- No distributed processing (single-process app).
-- Basic anomaly logic (2 std dev rule) may produce false positives/negatives.
-- `metrics-summary` returns raw values list, which can grow large.
+Removed generated artifacts from repository working tree:
+- Python bytecode files under `__pycache__`
+- local `monitoring.db`
 
-## 10) Suggested Next Improvements
+Added `.gitignore` to prevent re-adding:
+- `__pycache__/`
+- `*.py[cod]`
+- `*.db`
+- local environment/cache artifacts
 
-- Persist alerts to SQLite and reconcile with `alerts` table.
-- Add real metric collectors (CPU/memory/disk from host or exporters).
-- Add configurable threshold APIs and persistent configuration.
-- Add authentication and role-based API access.
-- Add pruning/retention policies for DB growth.
-- Add automated tests (unit + API integration).
-- Add structured logging and tracing for production diagnostics.
+## Current Limitations
 
-## 11) Quick Troubleshooting Guide
+- Alerts are in memory only (not persisted across restart).
+- SQLite is local-node friendly, not distributed scale.
+- No authentication/authorization yet.
+- No automated tests/CI yet.
+- Collector currently covers host-level metrics only.
 
-- Error: `zsh: no such file or directory: venv/bin/uvicorn`
-  - Cause: command executed outside project directory.
-  - Fix: run `./run_dev.sh` or use absolute path to script.
+## Recommended Next Steps
 
-- Error: dependency install fails on old pinned versions
-  - Cause: Python 3.13 incompatibility with very old wheel versions.
-  - Fix: use current `requirements.txt` (already updated).
-
-- Endpoint returns 500
-  - Check uvicorn console traceback first.
-  - Validate route return types and serialization compatibility.
-  - Confirm database file and permissions are valid.
-
----
-
-For demos/reports, focus on this narrative:
-1. Agent continuously ingests metrics.
-2. Detection engine transforms raw metrics into actionable alert signals.
-3. Dashboard endpoints convert system internals into operator-facing status and summaries.
+- Persist alerts and incident correlations to DB.
+- Add test suite (unit + API + integration).
+- Add auth/rate limiting for APIs.
+- Add retention and pruning policy.
+- Add deployment profiles (`dev/staging/prod`) with per-environment thresholds.

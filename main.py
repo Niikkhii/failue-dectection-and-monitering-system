@@ -40,6 +40,10 @@ class AlertData(BaseModel):
     message: str
     source: Optional[str] = "api"
 
+
+class ThresholdUpdate(BaseModel):
+    value: float
+
 # Startup event
 @app.on_event("startup")
 async def startup():
@@ -129,6 +133,21 @@ def get_health_status() -> Dict[str, Any]:
 def get_agent_status() -> Dict[str, Any]:
     """Get monitoring agent status"""
     return monitoring_agent.get_status()
+
+
+@app.get("/thresholds")
+def get_thresholds() -> Dict[str, float]:
+    """Get current detection thresholds"""
+    return detection_engine.thresholds
+
+
+@app.put("/thresholds/{metric}")
+def update_threshold(metric: str, payload: ThresholdUpdate) -> Dict[str, Any]:
+    """Update threshold for a metric"""
+    if metric not in detection_engine.thresholds:
+        raise HTTPException(status_code=404, detail=f"Unknown metric: {metric}")
+    detection_engine.update_threshold(metric, payload.value)
+    return {"metric": metric, "new_threshold": payload.value}
 
 # Root endpoint
 @app.get("/")
