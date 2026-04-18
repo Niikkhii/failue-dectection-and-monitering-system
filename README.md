@@ -1,5 +1,6 @@
 # Failure Detection and Monitoring System
 
+![CI](https://github.com/Niikkhii/failure-detection-and-monitoring-system/actions/workflows/ci.yml/badge.svg)
 Production-style monitoring backend built with FastAPI, SQLite, and a separate collector process.
 
 ## Overview
