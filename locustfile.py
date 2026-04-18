@@ -1,5 +1,4 @@
 from locust import HttpUser, task, between, events
-import json
 
 class MonitoringSystemUser(HttpUser):
     wait_time = between(1, 3)
